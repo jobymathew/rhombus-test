@@ -42,6 +42,7 @@ cd rhombus-test
 docker-compose up --build
 ```
 3. **Access the Application**
+
 The application should now be running at http://localhost:8000.
 
 ## How to Run Without Docker

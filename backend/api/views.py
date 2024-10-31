@@ -38,8 +38,12 @@ class DataTypeInferenceView(APIView):
             # Map pandas types to user-friendly names
             type_mapping = {
                 'object': 'Text',
-                'int64': 'Integer',
-                'Int64': 'Integer (with nulls)',
+                'int64': 'Number',
+                'int8': 'Number',
+                'int32': 'Number',
+                'Int64': 'Number',
+                'Int8': 'Number',
+                'Int32': 'Number',
                 'float64': 'Decimal',
                 'datetime64[ns]': 'Date/Time',
                 'bool': 'Boolean',

@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import dask.dataframe as dd
 import warnings
+import math
 
 class DataTypeInference:
     """A class to handle intelligent data type inference for pandas DataFrames."""
@@ -47,6 +48,25 @@ class DataTypeInference:
     def _estimate_file_size(self, file_path: Union[str, Path]) -> int:
         """Estimate file size in bytes."""
         return Path(file_path).stat().st_size
+    
+    
+    def _is_json_safe(self, value):
+        """Check if a numeric value is JSON-safe."""
+        if pd.isna(value):
+            return True
+        if not isinstance(value, (int, float)):
+            return True
+        return not (math.isinf(float(value)) or math.isnan(float(value)))
+
+    def _sanitize_numeric_series(self, series: pd.Series) -> pd.Series:
+        """Clean numeric series to ensure JSON compliance."""
+        # Replace inf values with None
+        series = series.replace([np.inf, -np.inf], np.nan)
+        
+        # Handle non-finite values
+        series = series.apply(lambda x: None if pd.isna(x) or (isinstance(x, float) and not math.isfinite(x)) else x)
+        
+        return series
 
     def _get_optimal_numeric_type(self, series: pd.Series) -> str:
         """
@@ -58,6 +78,13 @@ class DataTypeInference:
         Returns:
             str: Optimal data type
         """
+        # First sanitize the series
+        series = self._sanitize_numeric_series(series)
+        
+        # Check if the series has any valid values left
+        if series.isna().all():
+            return 'float64'  # Default to float64 for all-null series
+        
         
         # Check if the series has NaN values
         has_na = series.isna().any()
@@ -67,64 +94,62 @@ class DataTypeInference:
         # Get min and max values
         min_val = series.min()
         max_val = series.max()
+        
+        
 
-        # If integers only and no NaNs, use integer types
-        if series.dtype.kind in ['i', 'f']:
-            if not has_na:
-                # Check if the series only contains integer values
-                if series.apply(lambda x: x.is_integer()).all():
-                    # Assign optimal integer type
-                    if min_val >= -128 and max_val <= 127:
-                        return 'int8'
-                    elif min_val >= -32768 and max_val <= 32767:
-                        return 'int16'
-                    elif min_val >= -2147483648 and max_val <= 2147483647:
-                        return 'int32'
-                    else:
-                        return 'int64'
+        # Check if all non-null values are integers
+        is_integer_series = series.dropna().apply(lambda x: float(x).is_integer()).all()
+        
+        if is_integer_series:
+            if has_na:
+                # Use nullable integer types for series with NaN values
+                if min_val >= -128 and max_val <= 127:
+                    return 'Int8'
+                elif min_val >= -32768 and max_val <= 32767:
+                    return 'Int16'
+                elif min_val >= -2147483648 and max_val <= 2147483647:
+                    return 'Int32'
+                return 'Int64'
             else:
-                # Handle nullable integers when NaNs are present
-                try:
-                    series_int64 = series.astype('Int64')  # Nullable integer type
-                    return 'Int64'
-                except ValueError:
-                    pass  # Fall back if the conversion to Int64 fails
+                # Use regular integer types when no NaN values
+                if min_val >= -128 and max_val <= 127:
+                    return 'int8'
+                elif min_val >= -32768 and max_val <= 32767:
+                    return 'int16'
+                elif min_val >= -2147483648 and max_val <= 2147483647:
+                    return 'int32'
+                return 'int64'
         
-        # Check for float32 sufficiency if it's a float column
-        if series.dtype.kind == 'f':
-            float32_series = series.astype('float32')
-            if (series - float32_series).abs().max() < 1e-6:
-                return 'float32'
-
+        # For float values, check if float32 is sufficient
+        if not is_integer_series:
+            try:
+                float32_series = series.astype('float32')
+                if (series.dropna() - float32_series.dropna()).abs().max() < 1e-6:
+                    return 'float32'
+            except Exception:
+                pass
+                
         return 'float64'
-        
-        # if series.dtype.kind not in ['i', 'f']:
-        #     return series.dtype
+    
+    def _safe_numeric_conversion(self, series: pd.Series, target_dtype: str) -> pd.Series:
+        """Safely convert a series to a numeric type with proper error handling."""
+        try:
+            # First convert to float64 to handle any decimal values
+            numeric_series = pd.to_numeric(series, errors='coerce')
             
-        # # Get min and max values
-        # min_val = series.min()
-        # max_val = series.max()
-        
-        # # Check if integers only
-        # if series.dtype.kind == 'f':
-        #     if series.dropna().apply(lambda x: x.is_integer()).all():
-        #         # Convert to integer type
-        #         if min_val >= -128 and max_val <= 127:
-        #             return 'int8'
-        #         elif min_val >= -32768 and max_val <= 32767:
-        #             return 'int16'
-        #         elif min_val >= -2147483648 and max_val <= 2147483647:
-        #             return 'int32'
-        #         else:
-        #             return 'int64'
-        
-        # # For floats, check if float32 is sufficient
-        # if series.dtype.kind == 'f':
-        #     float32_series = series.astype('float32')
-        #     if (series - float32_series).abs().max() < 1e-6:
-        #         return 'float32'
-        
-        # return 'float64'
+            # Sanitize the series
+            numeric_series = self._sanitize_numeric_series(numeric_series)
+            
+            # Convert to target type
+            if target_dtype.startswith('Int'):
+                # For nullable integer types, round floats first
+                numeric_series = numeric_series.round()
+            
+            return numeric_series.astype(target_dtype)
+            
+        except Exception as e:
+            self.logger.warning(f"Error in numeric conversion: {str(e)}")
+            return series
 
     def _check_date_pattern(self, value: str) -> bool:
         """Check if a string matches any common date pattern."""
@@ -167,58 +192,41 @@ class DataTypeInference:
         Returns:
             tuple: (inferred_type, conversion_function)
         """
-        # Convert common placeholders to NaN (e.g., "Not Available")
-        # series = series.replace(["Not Available", "NA", "N/A", "null"], 2.0)
         
+        # Handle empty series
+        if len(series) == 0:
+            return 'object', str
+            
+        # Handle all-null series
+        if series.isna().all():
+            return 'float64', float
         
         # Check for datetime first
         if self._is_datetime_column(series):
             return 'datetime64[ns]', pd.to_datetime
-        
-        # Check for alphanumeric
-        # If the series contains any non-numeric values, treat as string
-        if series.astype(str).str.contains(r'[^\d.-]').any():
-            print('True this one has alphanumeric')
-        
-        # Check if the series predominantly contains text
-        # if series.dtype == 'object' and series.apply(lambda x: isinstance(x, str)).mean() > 0.9:
-        #     # Convert to 'string' type if mostly strings
-        #     return pd.StringDtype(), lambda x: x.astype(pd.StringDtype())
     
-    # Try numeric conversion only if it does not look like text
-        numeric_series = pd.to_numeric(series, errors='coerce')
-        if numeric_series.notna().any():
-            # Check if integer-like and no NaNs, suitable for ID columns like invoiceNo
-            if numeric_series.dropna().apply(float.is_integer).all():
+            # Try numeric conversion
+        try:
+            numeric_series = pd.to_numeric(series, errors='coerce')
+            if numeric_series.notna().any():
                 optimal_type = self._get_optimal_numeric_type(numeric_series)
-                return optimal_type, lambda x: pd.to_numeric(x, errors='coerce').astype(optimal_type)
-            else:
-                # Use float type when decimal values are present
-                return 'float64', lambda x: pd.to_numeric(x, errors='coerce').astype('float64')    
-        # Try numeric conversion
-        # numeric_series = pd.to_numeric(series, errors='coerce')
-        # if numeric_series.notna().any():
-        #     optimal_type = self._get_optimal_numeric_type(numeric_series)
-        #     return optimal_type, lambda x: pd.to_numeric(x, errors='coerce').astype(optimal_type)
-            
+                return optimal_type, lambda x: self._safe_numeric_conversion(x, optimal_type)
+        except Exception as e:
+            self.logger.debug(f"Numeric conversion failed for {column_name}: {str(e)}")
+        
         # Check for categorical
         if series.dtype == 'object':
             unique_ratio = len(series.unique()) / len(series)
             if unique_ratio < self.categorical_threshold:
                 return 'category', pd.Categorical
-            
-            # Check if the series contains only strings and convert to string dtype
-            # elif series.apply(lambda x: isinstance(x, str)).all():
-                # return pd.StringDtype(), lambda x: x.astype(pd.StringDtype())
-            
-        # Convert to 'string' type if mostly strings and not categorical
-        if series.apply(lambda x: isinstance(x, str)).mean() > 0.9:
+        
+        # Default to string type for text data
+        if series.dtype == 'object':
             return pd.StringDtype(), lambda x: x.astype(pd.StringDtype())
-            
-            
-                
-        # Default to object type
-        return 'object', str
+        
+        # Keep original type if nothing else matches
+        return series.dtype, lambda x: x
+
 
     def process_file(self, 
                     file_path: Union[str, Path], 
@@ -258,6 +266,7 @@ class DataTypeInference:
             df = pd.read_excel(file_path, **kwargs)
         else:
             raise ValueError(f"Unsupported file type: {file_path.suffix}")
+        
             
         return self.infer_and_convert_types(df)
 
@@ -270,6 +279,7 @@ class DataTypeInference:
         
         # Create Dask DataFrame
         ddf = dd.read_csv(file_path, **kwargs)
+        
         
         # Compute column types using a sample
         sample_df = ddf.head(n=10000)

@@ -1,5 +1,6 @@
 import tempfile
 import os
+import sys
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser
@@ -60,7 +61,9 @@ class DataTypeInferenceView(APIView):
             }
 
             # Get a preview of the data
-            preview_data = df.head(5).to_dict('records')
+            preview_data = inference.get_preview(tmp_file_path).to_dict('records')
+            
+            
 
             return Response({
                 'column_types': friendly_types,

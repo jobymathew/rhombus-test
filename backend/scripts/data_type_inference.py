@@ -322,8 +322,23 @@ class DataTypeInference:
                 continue
                 
         return result_df
+    
+    def get_preview(self, file_path: Path, **kwargs) -> pd.DataFrame:
+        """Send first 5 values of the database."""
+        # Read the file
+        try:
+            df = pd.read_csv(file_path, **kwargs)
+            return df.head(5)
+        except FileNotFoundError:
+            print("The specified file was not found.")
+        except pd.errors.EmptyDataError:
+            print("The file is empty.")
+        except pd.errors.ParserError:
+            print("There was an error parsing the file.")
+            df = pd.read_csv(file_path, **kwargs)
+            
 
-# Example usage
+# Trail usage
 if __name__ == "__main__":
     # Initialize the converter
     dtype_converter = DataTypeInference(
